@@ -9,3 +9,4 @@ test.py
 *.pyc
 fairdata_test*
 dist
+.venv
