@@ -130,24 +130,51 @@ class Test_Suite():
 
     def __init__(self, wb_path, to_run=None, to_skip=None, config_path=None):
         self.wb_path = wb_path
+        self.config_path = config_path
+        self.to_run = to_run
+        self.to_skip = to_skip
+        self.results = dict()
+        self.results["file"] = dict()
 
+        # Discover all the tests to run
+        self.all_tests = _discover_tests(test_level = "all", to_run = to_run, to_skip = to_skip)
+
+        # Determine which tests should be run (check config, to_run/to_skip)
+        self._collect_tests()
+
+        # Organize the test by level
+        self.file_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in self.all_tests.items() if t_name.startswith("file")}
+        self.sheet_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in self.all_tests.items() if t_name.startswith("sheet")}
+        self.header_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in self.all_tests.items() if t_name.startswith("header")}
+        self.cell_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in self.all_tests.items() if t_name.startswith("cell")}
+
+        # Load and prepare dataframe for execution
+        self._load_dataframe()
+        self._set_dataframe_headers()
+
+
+    def _collect_tests(self):
         # --- load config from JSON (optional) ---
         self.config = {}
-        if config_path is not None:
+        if self.config_path is not None:
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(self.config_path, "r", encoding="utf-8") as f:
                     self.config = json.load(f)
             except FileNotFoundError:
-                print(f"Warning: Config file '{config_path}' not found. Using defaults.")
+                print(f"Warning: Config file '{self.config_path}' not found. Using defaults.")
             except json.JSONDecodeError as e:
-                print(f"Warning: Config file '{config_path}' has invalid JSON: {e}. Using defaults.")
+                print(f"Warning: Config file '{self.config_path}' has invalid JSON: {e}. Using defaults.")
 
-
+        # Verify that config only contains valid test names
+        for test_name in self.config.keys():
+            if test_name not in self.all_tests:
+                raise ValueError(f"Invalid test name in config: {test_name}. Using specified tests from to_run or to_skip, allowed test names are: {list(self.all_tests.keys())}.")
+            
         # --- validate to_run / to_skip mutual exclusivity ---
-        if to_run is not None and to_skip is not None:
+        if self.to_run is not None and self.to_skip is not None:
             raise ValueError("Cannot specify both to_run and to_skip. Use one or neither.")
         
-        to_filter = to_run if to_run else to_skip
+        to_filter = self.to_run if self.to_run else self.to_skip
         if to_filter:
             if not isinstance(to_filter, list):
                 raise ValueError("to_run or to_skip must be a list (of test names).")
@@ -155,26 +182,9 @@ class Test_Suite():
                 raise ValueError("to_run or to_skip lists must be of test names (strings).")
 
 
-        # Discover all the tests to run
-        all_tests = _discover_tests(test_level = "all", to_run = to_run, to_skip = to_skip)
-
-        # Verify that config only contains valid test names
-        for test_name in self.config.keys():
-            if test_name not in all_tests:
-                raise ValueError(f"Invalid test name in config: {test_name}. Using specified tests from to_run or to_skip, allowed test names are: {list(all_tests.keys())}.")
-
-
-        # Initialize the results dict,
-        # levels:  [sheet_name] -> [test_name] -> [test_object]
-        self.results = dict()
-        # Initialize the results dict for the file
-        self.results["file"] = dict()
-
-
-
-        # First the file level tests
-        self.file_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in all_tests.items() if t_name.startswith("file")}
-
+    def _load_dataframe(self):
+        # TODO: ideally we wouldn't be modifying the list of functions in _load_dataframe(),
+        # but will need to refactor to treat the file encoding check as something other than a test
 
         # --- File encoding test ---
         # Must happen before loading pandas dataframe
@@ -194,28 +204,26 @@ class Test_Suite():
             pass
 
 
-        # Extract file extension from wb_path
-        file_extension = os.path.splitext(wb_path)[1]
-
+        file_extension = os.path.splitext(self.wb_path)[1]
 
         # If the file extension is .xlsx, read the file as an excel file
         if file_extension == ".xlsx":
-            if _is_strict_open_xml_spreadsheet(wb_path):
+            if _is_strict_open_xml_spreadsheet(self.wb_path):
                 raise ValueError(
-                    f"File {wb_path} is a Strict Open XML Spreadsheet (ISO 29500), not a standard "
+                    f"File {self.wb_path} is a Strict Open XML Spreadsheet (ISO 29500), not a standard "
                     "Excel workbook. This package reads standard .xlsx files only. Open the file in "
                     "Excel or LibreOffice Calc and use Save As to save as a normal Excel workbook "
                     "(.xlsx), then try again."
                 )
             self.wb = pd.read_excel(
-                io = wb_path, # The file path
+                io = self.wb_path, # The file path
                 dtype = "str", # Parse all cells as strings, leaves the parsing to the tests
                 sheet_name = None, # read all sheets returning a dict
                 header = None, # Do not load the header at all
             )
         elif file_extension == ".csv" or file_extension == ".tsv":
             self.wb = pd.read_csv(
-                wb_path, # The file path
+                self.wb_path, # The file path
                 sep = None, # Automatically detect the separator
                 engine = "python", # Enables sep=None and ensures no c engine.
                 dtype = "str", # Parse all cells as strings, leaves the parsing to the tests
@@ -226,24 +234,12 @@ class Test_Suite():
                 encoding_errors = "replace", # Replace invalid characters with ?
             )
             # Make the single sheet into a singleton dict to match excel format
-            self.wb = {os.path.splitext(os.path.basename(wb_path))[0]: self.wb}
+            self.wb = {os.path.splitext(os.path.basename(self.wb_path))[0]: self.wb}
         else:
-            raise ValueError(f"File {wb_path} has an invalid file extension: {file_extension}. Use '.xlsx', or '.csv'.  If you want to use '.xls', use conda to install xlrd and change the if statement above to allow xls.")
+            raise ValueError(f"File {self.wb_path} has an invalid file extension: {file_extension}. Use '.xlsx', or '.csv'.  If you want to use '.xls', use conda to install xlrd and change the if statement above to allow xls.")
 
 
-        # --- Check input arguments from config to tests
-        
-        
-        # Initialize the sheet tests to check input arguments
-        self.sheet_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in all_tests.items() if t_name.startswith("sheet")}
-
-        # Initialize the header tests to check input arguments
-        self.header_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in all_tests.items() if t_name.startswith("header")}
-
-        # Initialize the cell tests to check input arguments
-        self.cell_tests = {t_name: self._create_test(t_cls) for t_name, t_cls in all_tests.items() if t_name.startswith("cell")}
-
-
+    def _set_dataframe_headers(self):
         # Set the first row to be headers no matter what
         def set_headers(df):
             # If empty
@@ -264,11 +260,6 @@ class Test_Suite():
             self.wb = {name : set_headers(df) for name, df in self.wb.items()}
         else:
             self.wb = set_headers(self.wb)
-
-
-
-
-
 
 
     def _create_test(self, test_cls):
@@ -401,7 +392,6 @@ class Test_Suite():
         return finalized_tests
 
 
-
     def run(self):
         # --- file-level tests ---
         print("Running file-level tests")
@@ -416,7 +406,7 @@ class Test_Suite():
             print(f"Running tests for sheet: {sheet}")
             self.results[sheet] = self._validate_tests(fresh_tests, [ws, sheet])
 
-            
+
     # Print a report of the results
     def report(self):
 
@@ -439,9 +429,8 @@ class Test_Suite():
                 print(f"Issues: {pprint.pformat(trimmed_result['issues'])}")
 
                 # Add some space
-                print("\n")
+                print("\n") 
 
-            
 
     # Trim the results to only include dict entries for failed tests
     def trimmed_results(self, stringify = False):
@@ -484,6 +473,7 @@ class Test_Suite():
         # Return the trimmed results
         # This is a dict of sheet names, each containing a dict of test names and their results
         return trimmed_results
+
 
     # Save the results to a file
     def save(self, format="json", filename=None):
